@@ -120,7 +120,17 @@ def _pytest_pyfunc_call(pyfuncitem):
         return testfunction(**testargs)
 
 
+def pytest_collection_modifyitems(config, items):
+    if not config.getoption("--twisted-marked-only"):
+        twisted_marker = pytest.mark.twisted()
+        for item in items:
+            item.add_marker(twisted_marker)
+
+
 def pytest_pyfunc_call(pyfuncitem):
+    if "twisted" not in pyfuncitem.keywords:
+        return
+
     if _instances.gr_twisted is not None:
         if _instances.gr_twisted.dead:
             raise RuntimeError("twisted reactor has stopped")
@@ -212,6 +222,12 @@ def pytest_addoption(parser):
         "--reactor",
         default="default",
         choices=tuple(reactor_installers.keys()),
+    )
+    group.addoption(
+        "--twisted-marked-only",
+        action="store_true",
+        default=False,
+        help="start twisted reactor only for tests marked with `pytest.mark.twisted`",
     )
 
 

@@ -53,6 +53,11 @@ def cmd_opts(request):
     return ("--reactor={}".format(reactor),)
 
 
+@pytest.fixture
+def cmd_opts_marked_only(cmd_opts):
+    return cmd_opts + ("--twisted-marked-only",)
+
+
 def test_inline_callbacks_in_pytest():
     assert hasattr(pytest, 'inlineCallbacks')
 
@@ -493,3 +498,37 @@ def test_wrong_reactor_with_asyncio(testdir, cmd_opts, request):
     testdir.makepyfile(test_file)
     rr = testdir.run(sys.executable, "-m", "pytest", "-v", *cmd_opts)
     assert "WrongReactorAlreadyInstalledError" in rr.stderr.str()
+
+
+def test_twisted_for_all_tests_by_default(testdir, cmd_opts):
+    test_file = """
+    import pytest
+    from twisted.internet import reactor, defer
+
+    def test_reactor_running():
+        assert reactor.running
+    
+    @pytest.mark.twisted
+    def test_reactor_running_with_mark():
+        assert reactor.running
+    """
+    testdir.makepyfile(test_file)
+    rr = testdir.run(sys.executable, "-m", "pytest", *cmd_opts)
+    assert_outcomes(rr, {"passed": 2})
+
+
+def test_twisted_for_marked_only_tests_with_cmdopt(testdir, cmd_opts_marked_only):
+    test_file = """
+    import pytest
+    from twisted.internet import reactor, defer
+
+    def test_reactor_running():
+        assert not reactor.running
+    
+    @pytest.mark.twisted
+    def test_reactor_running_with_mark():
+        assert reactor.running
+    """
+    testdir.makepyfile(test_file)
+    rr = testdir.run(sys.executable, "-m", "pytest", *cmd_opts_marked_only)
+    assert_outcomes(rr, {"passed": 2})
