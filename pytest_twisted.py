@@ -5,7 +5,10 @@ import warnings
 import decorator
 import greenlet
 import pytest
+import sys
 
+from _pytest.fixtures import scopes
+from mock import patch
 from twisted.internet import error, defer
 from twisted.internet.threads import blockingCallFromThread
 from twisted.python import failure
@@ -17,6 +20,7 @@ class WrongReactorAlreadyInstalledError(Exception):
 
 class _config:
     external_reactor = False
+    reactor_installer = None
 
 
 class _instances:
@@ -127,6 +131,12 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(twisted_marker)
 
 
+def pytest_runtest_setup(item):
+    if "twisted" in item.keywords and "twisted_greenlet" not in item.fixturenames:
+        # inject a twisted greenlet fixture for all twisted tests
+        item.fixturenames.append("twisted_greenlet")
+
+
 def pytest_pyfunc_call(pyfuncitem):
     if "twisted" not in pyfuncitem.keywords:
         return
@@ -152,10 +162,29 @@ def pytest_pyfunc_call(pyfuncitem):
     return True
 
 
-@pytest.fixture(scope="session", autouse=True)
-def twisted_greenlet(request):
-    request.addfinalizer(stop_twisted_greenlet)
-    return _instances.gr_twisted
+def _twisted_greenlet_fixture_factory(scope):
+    if scope == 'session':
+        _config.reactor_installer()
+
+        def twisted_greenlet_session(request):
+            request.addfinalizer(stop_twisted_greenlet)
+            return _instances.gr_twisted
+
+        return twisted_greenlet_session
+
+    def twisted_greenlet(request):
+        if 'twisted.internet.reactor' in sys.modules:
+            del sys.modules['twisted.internet.reactor']
+
+        _config.reactor_installer()
+
+        del sys.modules['twisted.internet.reactor']
+
+        request.addfinalizer(stop_twisted_greenlet)
+        with patch('twisted.internet.reactor', _instances.reactor):
+            yield _instances.gr_twisted
+
+    return twisted_greenlet
 
 
 def init_default_reactor():
@@ -229,6 +258,12 @@ def pytest_addoption(parser):
         default=False,
         help="start twisted reactor only for tests marked with `pytest.mark.twisted`",
     )
+    group.addoption(
+        "--twisted-scope",
+        default="session",
+        choices=tuple(scopes),
+        help="specify scope for pytest-twisted's fixture",
+    )
 
 
 def pytest_configure(config):
@@ -241,4 +276,10 @@ def pytest_configure(config):
         recommended='pytest_twisted.blockon',
     )(blockon)
 
-    reactor_installers[config.getoption("reactor")]()
+    _config.reactor_installer = reactor_installers[config.getoption("reactor")]
+
+    fixture_scope = config.getoption("twisted_scope")
+
+    func = _twisted_greenlet_fixture_factory(fixture_scope)
+    fixture = pytest.fixture(scope=fixture_scope, name='twisted_greenlet')(func)
+    setattr(sys.modules[__name__], 'twisted_greenlet', fixture)
