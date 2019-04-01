@@ -1,12 +1,12 @@
 import functools
 import inspect
+import sys
 import warnings
 
 import decorator
 import greenlet
 import pytest
-
-from twisted.internet import error, defer
+from twisted.internet import defer, error
 from twisted.internet.threads import blockingCallFromThread
 from twisted.python import failure
 
@@ -16,10 +16,13 @@ class WrongReactorAlreadyInstalledError(Exception):
 
 
 class _config:
+    reactor_installer = None
     external_reactor = False
 
 
 class _instances:
+    _reactor_original = None
+
     gr_twisted = None
     reactor = None
 
@@ -104,6 +107,11 @@ def stop_twisted_greenlet():
         _instances.reactor.stop()
         _instances.gr_twisted.switch()
 
+    _instances.gr_twisted = None
+    _instances.reactor = None
+
+    _set_system_reactor(_instances._reactor_original)
+
 
 def _pytest_pyfunc_call(pyfuncitem):
     testfunction = pyfuncitem.obj
@@ -127,9 +135,24 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(twisted_marker)
 
 
+def pytest_runtest_setup(item):
+    if "twisted" in item.keywords and "twisted_greenlet" not in item.fixturenames:
+        # inject a twisted greenlet fixture for all twisted tests
+        item.fixturenames.append("twisted_greenlet")
+
+
 def pytest_pyfunc_call(pyfuncitem):
     if "twisted" not in pyfuncitem.keywords:
         return
+
+    del sys.modules['twisted.internet.reactor']
+
+    _config.reactor_installer()
+    import twisted.internet.reactor
+    _instances.reactor = twisted.internet.reactor
+    _instances.reactor._is_pytest_twisted = True
+    _set_system_reactor(_instances.reactor)
+    init_twisted_greenlet()
 
     if _instances.gr_twisted is not None:
         if _instances.gr_twisted.dead:
@@ -152,7 +175,7 @@ def pytest_pyfunc_call(pyfuncitem):
     return True
 
 
-@pytest.fixture(scope="session", autouse=True)
+@pytest.fixture
 def twisted_greenlet(request):
     request.addfinalizer(stop_twisted_greenlet)
     return _instances.gr_twisted
@@ -210,11 +233,6 @@ def _install_reactor(reactor_installer, reactor_type):
                 )
             )
 
-    import twisted.internet.reactor
-
-    _instances.reactor = twisted.internet.reactor
-    init_twisted_greenlet()
-
 
 def pytest_addoption(parser):
     group = parser.getgroup("twisted")
@@ -241,4 +259,27 @@ def pytest_configure(config):
         recommended='pytest_twisted.blockon',
     )(blockon)
 
-    reactor_installers[config.getoption("reactor")]()
+    _config.reactor_installer = reactor_installers[config.getoption("reactor")]
+    _config.reactor_installer()
+    _freeze_reactor()
+
+
+def _freeze_reactor():
+
+    def __dont__(*args, **kwargs):
+        raise ValueError("Don't touch the reactor outside `@pytest.mark.twisted`, "
+                         "please!")
+
+    import twisted.internet
+
+    twisted.internet.reactor.run = __dont__
+    twisted.internet.reactor.stop = __dont__
+    twisted.internet.reactor.crash = __dont__
+
+    _instances._reactor_original = twisted.internet.reactor
+
+
+def _set_system_reactor(reactor):
+    import twisted.internet
+    twisted.internet.reactor = reactor
+    sys.modules['twisted.internet.reactor'] = twisted.internet.reactor
